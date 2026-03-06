@@ -58,15 +58,17 @@ class HealthChecker:
         if not configs:
             return
 
-        # Set health to "checking" for all running configs
+        config_ids = [c.id for c in configs]
+
+        # Set health to "checking" for all running configs en masse
         async with async_session() as session:
-            for cfg in configs:
-                res = await session.execute(
-                    select(Configuration).where(Configuration.id == cfg.id)
-                )
-                c = res.scalar_one_or_none()
-                if c and c.status == "running":
-                    c.health = "checking"
+            from sqlalchemy import update
+            await session.execute(
+                update(Configuration)
+                .where(Configuration.id.in_(config_ids))
+                .where(Configuration.status == "running")
+                .values(health="checking")
+            )
             await session.commit()
 
         results = await asyncio.gather(
@@ -86,6 +88,7 @@ class HealthChecker:
                 pass
 
         async with async_session() as session:
+            from sqlalchemy import update
             for cfg, check in zip(configs, results):
                 bw = bandwidth_data.get(cfg.id, {})
 
@@ -97,12 +100,13 @@ class HealthChecker:
                         upload_speed_kbps=bw.get("up_kbps"),
                     )
                     session.add(snapshot)
-                    res = await session.execute(
-                        select(Configuration).where(Configuration.id == cfg.id)
+                    
+                    # Update config health natively without fetching
+                    await session.execute(
+                        update(Configuration)
+                        .where(Configuration.id == cfg.id)
+                        .values(health="unhealthy")
                     )
-                    c = res.scalar_one_or_none()
-                    if c:
-                        c.health = "unhealthy"
                 else:
                     snapshot = ConfigMetricSnapshot(
                         configuration_id=cfg.id,
@@ -114,12 +118,12 @@ class HealthChecker:
                     )
                     session.add(snapshot)
 
-                    res = await session.execute(
-                        select(Configuration).where(Configuration.id == cfg.id)
-                    )
-                    c = res.scalar_one_or_none()
-                    if c and check.get("is_alive"):
-                        c.health = "healthy"
+                    if check.get("is_alive"):
+                        await session.execute(
+                            update(Configuration)
+                            .where(Configuration.id == cfg.id)
+                            .values(health="healthy")
+                        )
 
             await session.commit()
 
