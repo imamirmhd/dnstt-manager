@@ -7,44 +7,104 @@ const ResolversPage = {
     _currentPage: 1,
     _perPage: 12,
     _totalPages: 1,
+    _allResolvers: [],
+    _filteredResolvers: [],
+    _searchQuery: '',
 
     async render() {
         const container = document.getElementById('page-container');
         container.innerHTML = UI.loading();
 
         try {
-            const res = await fetch(`/api/resolvers/?page=${this._currentPage}&per_page=${this._perPage}`);
+            const res = await fetch('/api/resolvers/');
             if (!res.ok) throw new Error('Failed to load');
             const result = await res.json();
 
-            const resolvers = Array.isArray(result) ? result : (result.items || []);
-            const total = Array.isArray(result) ? resolvers.length : (result.total || resolvers.length);
-            this._totalPages = Math.max(1, Math.ceil(total / this._perPage));
+            this._allResolvers = Array.isArray(result) ? result : (result.items || []);
+            this._applyFilterAndPagination();
 
             container.innerHTML = `
-                <div class="page-header page-header-actions">
+                <div class="page-header page-header-actions" style="flex-wrap: wrap; gap: 16px;">
                     <div>
                         <h1>Resolvers</h1>
                         <p>Manage DNS resolvers for tunnel transport</p>
                     </div>
-                    <button class="btn btn-primary" onclick="ResolversPage.showAddForm()">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px">
-                            <path d="M12 5v14M5 12h14"/>
-                        </svg>
-                        Add Resolver
-                    </button>
+                    <div style="display:flex;gap:12px;align-items:center;">
+                        <input type="text" class="form-input" style="width:200px;font-size:0.9rem;" placeholder="Search resolvers..." value="${esc(this._searchQuery)}" onkeyup="ResolversPage.setSearch(this.value)">
+                        <button class="btn btn-primary" onclick="ResolversPage.showAddForm()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px">
+                                <path d="M12 5v14M5 12h14"/>
+                            </svg>
+                            Add Resolver
+                        </button>
+                    </div>
                 </div>
 
-                ${resolvers.length === 0
-                    ? UI.emptyState('No resolvers yet. Add DoH, DoT, or UDP resolvers.', '+ Add Resolver', 'ResolversPage.showAddForm()')
-                    : `<div class="card-grid">${resolvers.map(r => this._card(r)).join('')}</div>`
-                }
-
-                ${this._totalPages > 1 ? this._pagination() : ''}
+                <div id="resolver-cards-container"></div>
+                <div id="resolver-pagination-container"></div>
             `;
+            this._updateListDOM();
         } catch (err) {
             container.innerHTML = `<div class="empty-state"><p>Error: ${err.message}</p></div>`;
         }
+    },
+
+    _applyFilterAndPagination() {
+        const q = this._searchQuery.toLowerCase();
+        this._filteredResolvers = this._allResolvers.filter(r =>
+            r.name.toLowerCase().includes(q) ||
+            (r.address && r.address.toLowerCase().includes(q)) ||
+            (r.resolver_type && r.resolver_type.toLowerCase().includes(q))
+        );
+        this._totalPages = Math.max(1, Math.ceil(this._filteredResolvers.length / this._perPage));
+        if (this._currentPage > this._totalPages) this._currentPage = 1;
+    },
+
+    _updateListDOM() {
+        const pageResolvers = this._filteredResolvers.slice((this._currentPage - 1) * this._perPage, this._currentPage * this._perPage);
+        const grid = document.getElementById('resolver-cards-container');
+        if (grid) {
+            grid.innerHTML = this._filteredResolvers.length === 0
+                ? UI.emptyState('No resolvers yet. Add DoH, DoT, or UDP resolvers.', '+ Add Resolver', 'ResolversPage.showAddForm()')
+                : `<div class="card-grid">${pageResolvers.map(r => this._card(r)).join('')}</div>`;
+        }
+        const pag = document.getElementById('resolver-pagination-container');
+        if (pag) {
+            pag.innerHTML = this._totalPages > 1 ? this._pagination() : '';
+        }
+    },
+
+    setSearch(query) {
+        this._searchQuery = query;
+        this._currentPage = 1;
+        this._applyFilterAndPagination();
+        this._updateListDOM();
+    },
+
+    async reloadData() {
+        try {
+            const res = await fetch('/api/resolvers/');
+            if (!res.ok) return;
+            const result = await res.json();
+            this._allResolvers = Array.isArray(result) ? result : (result.items || []);
+            this._applyFilterAndPagination();
+            this._updateListDOM();
+        } catch (e) { }
+    },
+
+    async updateCard(id) {
+        try {
+            const res = await fetch(`/api/resolvers/${id}`);
+            if (!res.ok) return;
+            const singleRes = await res.json();
+
+            const idx = this._allResolvers.findIndex(r => r.id === id);
+            if (idx !== -1) this._allResolvers[idx] = singleRes;
+            this._applyFilterAndPagination();
+
+            const el = document.getElementById(`resolver-card-${id}`);
+            if (el) el.outerHTML = this._card(singleRes);
+        } catch (e) { }
     },
 
     /** Deep-link handler for #/resolvers/detail/3 */
@@ -61,7 +121,7 @@ const ResolversPage = {
             pages += `<button class="btn btn-sm${active}" onclick="ResolversPage.goToPage(${i})">${i}</button>`;
         }
         return `
-        <div class="pagination">
+        <div class="pagination" style="margin-top:24px;">
             <button class="btn btn-sm" onclick="ResolversPage.goToPage(${this._currentPage - 1})" ${this._currentPage <= 1 ? 'disabled' : ''}>← Prev</button>
             ${pages}
             <button class="btn btn-sm" onclick="ResolversPage.goToPage(${this._currentPage + 1})" ${this._currentPage >= this._totalPages ? 'disabled' : ''}>Next →</button>
@@ -71,14 +131,16 @@ const ResolversPage = {
     goToPage(page) {
         if (page < 1 || page > this._totalPages) return;
         this._currentPage = page;
-        this.render();
+        this._applyFilterAndPagination();
+        this._updateListDOM();
+        window.scrollTo(0, 0);
     },
 
     _card(r) {
         const rateColor = r.success_rate >= 0.9 ? 'var(--green)' : r.success_rate >= 0.5 ? 'var(--yellow)' : 'var(--red)';
         const successCount = r.total_checks - (r.failed_checks || 0);
         return `
-        <div class="card" onclick="ResolversPage.showDetail(${r.id})">
+        <div class="card" id="resolver-card-${r.id}" onclick="ResolversPage.showDetail(${r.id})">
             <div class="card-header">
                 <div>
                     <div class="card-title">${esc(r.name)}</div>
@@ -125,19 +187,16 @@ const ResolversPage = {
 
     async remove(id) {
         if (!confirm('Delete this resolver?')) return;
-        const scrollPos = UI._saveScroll();
         try {
             await fetch(`/api/resolvers/${id}`, { method: 'DELETE' });
             UI.toast('Resolver deleted', 'success');
-            await this.render();
-            UI._restoreScroll(scrollPos);
+            await this.reloadData();
         } catch (err) {
             UI.toast(`Error: ${err.message}`, 'error');
         }
     },
 
     async testResolver(id) {
-        const scrollPos = UI._saveScroll();
         try {
             UI.toast('Testing resolver...', 'info');
             const res = await fetch(`/api/resolvers/${id}/test`, { method: 'POST' });
@@ -147,8 +206,7 @@ const ResolversPage = {
             } else {
                 UI.toast(data.message || 'Test failed', 'error');
             }
-            await this.render();
-            UI._restoreScroll(scrollPos);
+            await this.updateCard(id);
         } catch (err) {
             UI.toast(`Test error: ${err.message}`, 'error');
         }
@@ -291,7 +349,6 @@ const ResolversPage = {
         const form = event.target;
         const data = Object.fromEntries(new FormData(form));
 
-        const scrollPos = UI._saveScroll();
         try {
             const url = id ? `/api/resolvers/${id}` : '/api/resolvers/';
             const method = id ? 'PUT' : 'POST';
@@ -306,8 +363,7 @@ const ResolversPage = {
             }
             UI.closeModal();
             UI.toast(id ? 'Resolver updated' : 'Resolver created', 'success');
-            await this.render();
-            UI._restoreScroll(scrollPos);
+            await this.reloadData();
         } catch (err) {
             UI.toast(`Error: ${err.message}`, 'error');
         }

@@ -62,7 +62,16 @@ const SettingsPage = {
                                 <input class="form-input" id="setting-resolver_check_interval" type="number" value="${map.resolver_check_interval || 120}" min="10" />
                             </div>
                         </div>
-                        <div class="form-group">
+                        <div class="form-group" style="margin-top:12px;">
+                            <label class="form-label">HTTP Health Check URL</label>
+                            <input class="form-input" id="setting-health_check_url" value="${esc(map.health_check_url || 'http://gstatic.com/generate_204')}" placeholder="http://gstatic.com/generate_204" />
+                            <div style="font-size:0.8rem;color:var(--text-muted);margin-top:4px;">When testing over a proxy, this URL will be evaluated to determine real latency.</div>
+                        </div>
+                        <div class="form-group" style="margin-top:12px;">
+                            <label class="form-label">HTTP Health Check Samples (Per config)</label>
+                            <input class="form-input" id="setting-health_check_samples" type="number" value="${map.health_check_samples || 3}" min="1" max="10" />
+                        </div>
+                        <div class="form-group" style="margin-top:12px;">
                             <label class="form-label">System Monitor</label>
                             <input class="form-input" id="setting-system_monitor_interval" type="number" value="${map.system_monitor_interval || 5}" min="1" />
                         </div>
@@ -110,7 +119,8 @@ const SettingsPage = {
     async saveAll() {
         const keys = [
             'dnstt_client_path', 'slipstream_client_path', 'haproxy_binary',
-            'health_check_interval', 'resolver_check_interval', 'system_monitor_interval',
+            'health_check_interval', 'health_check_url', 'health_check_samples',
+            'resolver_check_interval', 'system_monitor_interval',
             'max_restart_attempts', 'restart_window_seconds', 'restart_backoff_base',
             'resolver_dead_threshold_hours',
         ];

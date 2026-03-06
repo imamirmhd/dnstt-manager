@@ -117,12 +117,7 @@ const BalancerPage = {
                                         <span class="card-stat-value">${dataStatus.total_connections}</span>
                                     </div>
 
-                                    ${dataStatus.backends.length > 0 ? `
-                                    <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border-subtle);font-size:0.8rem;color:var(--text-muted);">
-                                        <strong style="display:block;margin-bottom:6px;color:var(--text-secondary);">Active Backends:</strong>
-                                        ${dataStatus.backends.map(b => `<div style="font-family:var(--font-mono);margin-bottom:2px;">[ID ${b.config_id}] ${b.address} (${b.active} active)</div>`).join('')}
-                                    </div>
-                                    ` : ''}
+
                                 </div>
                                 <div style="margin-top:auto; display:flex; flex-direction:column;">
                                     <div class="form-group">

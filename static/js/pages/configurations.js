@@ -7,48 +7,88 @@ const ConfigurationsPage = {
     _currentPage: 1,
     _perPage: 12,
     _totalPages: 1,
+    _allConfigs: [],
+    _filteredConfigs: [],
+    _searchQuery: '',
 
     async render() {
         const container = document.getElementById('page-container');
         container.innerHTML = UI.loading();
 
         try {
-            const res = await fetch(`/api/configurations/?page=${this._currentPage}&per_page=${this._perPage}`);
+            const res = await fetch('/api/configurations/');
             if (!res.ok) throw new Error('Failed to load');
             const result = await res.json();
 
-            // Handle both paginated and non-paginated responses
-            const configs = Array.isArray(result) ? result : (result.items || []);
-            const total = Array.isArray(result) ? configs.length : (result.total || configs.length);
-            this._totalPages = Math.max(1, Math.ceil(total / this._perPage));
+            this._allConfigs = Array.isArray(result) ? result : (result.items || []);
+            this._applyFilterAndPagination();
 
             container.innerHTML = `
-                <div class="page-header page-header-actions">
+                <div class="page-header page-header-actions" style="flex-wrap: wrap; gap: 16px;">
                     <div>
                         <h1>Configurations</h1>
                         <p>Manage DNS tunnel configurations</p>
                     </div>
-                    <button class="btn btn-primary" onclick="ConfigurationsPage.showAddForm()">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px">
-                            <path d="M12 5v14M5 12h14"/>
-                        </svg>
-                        Add Configuration
-                    </button>
+                    <div style="display:flex;gap:12px;align-items:center;">
+                        <input type="text" class="form-input" style="width:200px;font-size:0.9rem;" placeholder="Search configurations..." value="${esc(this._searchQuery)}" onkeyup="ConfigurationsPage.setSearch(this.value)">
+                        <button class="btn" style="background:var(--card-bg);" onclick="ConfigurationsPage.actionAll('restart-all')">
+                            <span style="display:flex;align-items:center;gap:6px;">↻ Restart All</span>
+                        </button>
+                        <button class="btn" style="background:var(--card-bg);" onclick="ConfigurationsPage.actionAll('test-all')">
+                            <span style="display:flex;align-items:center;gap:6px;">⚡ Test All</span>
+                        </button>
+                        <button class="btn btn-primary" onclick="ConfigurationsPage.showAddForm()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px">
+                                <path d="M12 5v14M5 12h14"/>
+                            </svg>
+                            Add Configuration
+                        </button>
+                    </div>
                 </div>
 
-                ${configs.length === 0
-                    ? UI.emptyState('No tunnel configurations yet. Add your first one to get started.', '+ Add Configuration', 'ConfigurationsPage.showAddForm()')
-                    : `<div class="card-grid">${configs.map(c => this._card(c)).join('')}</div>`
-                }
-
-                ${this._totalPages > 1 ? this._pagination() : ''}
+                <div id="config-cards-container"></div>
+                <div id="config-pagination-container"></div>
             `;
+            this._updateListDOM();
         } catch (err) {
             container.innerHTML = `<div class="empty-state"><p>Error: ${err.message}</p></div>`;
         }
 
         // Start bandwidth polling for running configs
         this._pollBandwidth();
+    },
+
+    _applyFilterAndPagination() {
+        const q = this._searchQuery.toLowerCase();
+        this._filteredConfigs = this._allConfigs.filter(c =>
+            c.name.toLowerCase().includes(q) ||
+            (c.domain && c.domain.toLowerCase().includes(q)) ||
+            (c.transport_type && c.transport_type.toLowerCase().includes(q)) ||
+            (c.backend_type && c.backend_type.toLowerCase().includes(q))
+        );
+        this._totalPages = Math.max(1, Math.ceil(this._filteredConfigs.length / this._perPage));
+        if (this._currentPage > this._totalPages) this._currentPage = 1;
+    },
+
+    _updateListDOM() {
+        const pageConfigs = this._filteredConfigs.slice((this._currentPage - 1) * this._perPage, this._currentPage * this._perPage);
+        const grid = document.getElementById('config-cards-container');
+        if (grid) {
+            grid.innerHTML = this._filteredConfigs.length === 0
+                ? UI.emptyState('No configurations found.', '+ Add Configuration', 'ConfigurationsPage.showAddForm()')
+                : `<div class="card-grid">${pageConfigs.map(c => this._card(c)).join('')}</div>`;
+        }
+        const pag = document.getElementById('config-pagination-container');
+        if (pag) {
+            pag.innerHTML = this._totalPages > 1 ? this._pagination() : '';
+        }
+    },
+
+    setSearch(query) {
+        this._searchQuery = query;
+        this._currentPage = 1;
+        this._applyFilterAndPagination();
+        this._updateListDOM();
     },
 
     /** Deep-link handler for #/configurations/detail/5 */
@@ -65,7 +105,7 @@ const ConfigurationsPage = {
             pages += `<button class="btn btn-sm${active}" onclick="ConfigurationsPage.goToPage(${i})">${i}</button>`;
         }
         return `
-        <div class="pagination">
+        <div class="pagination" style="margin-top:24px;">
             <button class="btn btn-sm" onclick="ConfigurationsPage.goToPage(${this._currentPage - 1})" ${this._currentPage <= 1 ? 'disabled' : ''}>← Prev</button>
             ${pages}
             <button class="btn btn-sm" onclick="ConfigurationsPage.goToPage(${this._currentPage + 1})" ${this._currentPage >= this._totalPages ? 'disabled' : ''}>Next →</button>
@@ -75,7 +115,35 @@ const ConfigurationsPage = {
     goToPage(page) {
         if (page < 1 || page > this._totalPages) return;
         this._currentPage = page;
-        this.render();
+        this._applyFilterAndPagination();
+        this._updateListDOM();
+        window.scrollTo(0, 0);
+    },
+
+    async reloadData() {
+        try {
+            const res = await fetch('/api/configurations/');
+            if (!res.ok) return;
+            const result = await res.json();
+            this._allConfigs = Array.isArray(result) ? result : (result.items || []);
+            this._applyFilterAndPagination();
+            this._updateListDOM();
+        } catch (e) { }
+    },
+
+    async updateCard(id) {
+        try {
+            const res = await fetch(`/api/configurations/${id}`);
+            if (!res.ok) return;
+            const singleCfg = await res.json();
+
+            const idx = this._allConfigs.findIndex(c => c.id === id);
+            if (idx !== -1) this._allConfigs[idx] = singleCfg;
+            this._applyFilterAndPagination();
+
+            const el = document.getElementById(`config-card-${id}`);
+            if (el) el.outerHTML = this._card(singleCfg);
+        } catch (e) { }
     },
 
     destroy() {
@@ -124,7 +192,7 @@ const ConfigurationsPage = {
 
     _card(c) {
         return `
-        <div class="card" onclick="ConfigurationsPage.showDetail(${c.id})">
+        <div class="card" id="config-card-${c.id}" onclick="ConfigurationsPage.showDetail(${c.id})">
             <div class="card-header">
                 <div>
                     <div class="card-title">${esc(c.name)}</div>
@@ -146,6 +214,10 @@ const ConfigurationsPage = {
                     <span class="card-stat-value">${esc(c.resolver_name)}</span>
                 </div>
                 ` : ''}
+                <div class="card-stat" id="ping-${c.id}" style="display:none;">
+                    <span class="card-stat-label">HTTP Ping</span>
+                    <span class="card-stat-value ping-value">—</span>
+                </div>
                 <div class="card-stat" id="bw-${c.id}" style="display:none;">
                     <span class="card-stat-label">Bandwidth</span>
                     <span class="card-stat-value bw-value">—</span>
@@ -168,6 +240,7 @@ const ConfigurationsPage = {
                 ${c.status === 'running' ? `
                     <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();ConfigurationsPage.action(${c.id},'stop')">Stop</button>
                     <button class="btn btn-sm" onclick="event.stopPropagation();ConfigurationsPage.action(${c.id},'restart')">Restart</button>
+                    ${c.health === 'healthy' || c.health === 'checking' ? `<button class="btn btn-sm" onclick="event.stopPropagation();ConfigurationsPage.action(${c.id},'test')">Test</button>` : ''}
                 ` : `
                     <button class="btn btn-sm btn-success" onclick="event.stopPropagation();ConfigurationsPage.action(${c.id},'start')">Start</button>
                 `}
@@ -179,15 +252,34 @@ const ConfigurationsPage = {
     },
 
     async action(id, action) {
-        const scrollPos = UI._saveScroll();
         try {
             const res = await fetch(`/api/configurations/${id}/${action}`, { method: 'POST' });
             const data = await res.json();
-            UI.toast(data.message || `${action} done`, res.ok ? 'success' : 'error');
+
+            if (action === 'test') {
+                if (data.is_alive && data.http_ping_ms !== null) {
+                    UI.toast(`Test complete: ${Math.round(data.http_ping_ms)}ms`, 'success');
+                } else {
+                    UI.toast('Test failed: Proxy unreachable or offline', 'error');
+                }
+            } else {
+                UI.toast(data.message || `${action} done`, res.ok ? 'success' : 'error');
+            }
+
             setTimeout(async () => {
-                await this.render();
-                UI._restoreScroll(scrollPos);
+                await this.updateCard(id);
             }, 500);
+        } catch (err) {
+            UI.toast(`Error: ${err.message}`, 'error');
+        }
+    },
+
+    async actionAll(actionPath) {
+        if (!confirm(`Are you sure you want to run ${actionPath} on all running configurations?`)) return;
+        try {
+            const res = await fetch(`/api/configurations/${actionPath}`, { method: 'POST' });
+            const data = await res.json();
+            UI.toast(data.message || 'Action started', res.ok ? 'success' : 'error');
         } catch (err) {
             UI.toast(`Error: ${err.message}`, 'error');
         }
@@ -195,12 +287,10 @@ const ConfigurationsPage = {
 
     async remove(id) {
         if (!confirm('Delete this configuration?')) return;
-        const scrollPos = UI._saveScroll();
         try {
             await fetch(`/api/configurations/${id}`, { method: 'DELETE' });
             UI.toast('Configuration deleted', 'success');
-            await this.render();
-            UI._restoreScroll(scrollPos);
+            await this.reloadData();
         } catch (err) {
             UI.toast(`Error: ${err.message}`, 'error');
         }
@@ -519,7 +609,6 @@ const ConfigurationsPage = {
         if (!data.backend_password) delete data.backend_password;
         if (!data.socks_address) delete data.socks_address;
 
-        const scrollPos = UI._saveScroll();
         try {
             const url = id ? `/api/configurations/${id}` : '/api/configurations/';
             const method = id ? 'PUT' : 'POST';
@@ -534,8 +623,7 @@ const ConfigurationsPage = {
             }
             UI.closeModal();
             UI.toast(id ? 'Configuration updated' : 'Configuration created', 'success');
-            await this.render();
-            UI._restoreScroll(scrollPos);
+            await this.reloadData();
         } catch (err) {
             UI.toast(`Error: ${err.message}`, 'error');
         }
