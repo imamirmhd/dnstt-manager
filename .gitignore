@@ -19,8 +19,8 @@ __pycache__/
 *.swo
 
 # Database
-data/dnstt.db
-data/dnstt.db-journal
+data/*.db
+data/*.db-journal
 *.sqlite3
 
 # Logs
