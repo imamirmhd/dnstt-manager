@@ -109,6 +109,50 @@ async def restart_configuration(config_id: int, db: AsyncSession = Depends(get_d
     return await process_manager.restart(config_id)
 
 
+@router.post("/{config_id}/test")
+async def test_configuration(config_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Configuration).where(Configuration.id == config_id))
+    cfg = result.scalar_one_or_none()
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="Configuration not found")
+        
+    from app.core.health_checker import health_checker
+    res = await health_checker._check_config(cfg)
+    return res
+
+
+@router.post("/test-all")
+async def test_all_configurations(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Configuration).where(Configuration.status == "running"))
+    configs = list(result.scalars().all())
+    
+    from app.core.health_checker import health_checker
+    
+    # We will just trigger a background task to check everyone and save to DB
+    # We don't want to block the HTTP response if there are 100+ tunnels
+    import asyncio
+    asyncio.create_task(health_checker._run_checks())
+    
+    return {"ok": True, "message": f"Testing {len(configs)} running configurations in the background."}
+
+
+@router.post("/restart-all")
+async def restart_all_configurations(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Configuration).where(Configuration.status == "running"))
+    configs = list(result.scalars().all())
+    
+    import asyncio
+    
+    async def _restart_bg():
+        for c in configs:
+            await process_manager.restart(c.id)
+            await asyncio.sleep(0.5)  # stagger slightly
+            
+    asyncio.create_task(_restart_bg())
+    
+    return {"ok": True, "message": f"Restarting {len(configs)} configurations in the background."}
+
+
 @router.get("/{config_id}/logs")
 async def get_configuration_logs(config_id: int):
     logs = process_manager.get_logs(config_id)

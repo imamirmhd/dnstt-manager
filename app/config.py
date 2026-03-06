@@ -25,6 +25,8 @@ class Settings:
     slipstream_client_path: str = "slipstream-client"
     # Check intervals (seconds)
     health_check_interval: int = 60
+    health_check_url: str = "http://gstatic.com/generate_204"
+    health_check_samples: int = 3
     resolver_check_interval: int = 120
     system_monitor_interval: int = 5
     # Resolver dead threshold (hours)

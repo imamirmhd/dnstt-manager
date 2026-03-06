@@ -21,12 +21,12 @@ class Configuration(Base, IDMixin, TimestampMixin):
     domain: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # Local listen endpoint — clients connect here
-    listen_address: Mapped[str] = mapped_column(String(64), default="127.0.0.1")
+    listen_address: Mapped[str] = mapped_column(String(64), default="0.0.0.0")
     listen_port: Mapped[int] = mapped_column(Integer, nullable=False)
 
     # Backend type: "socks5" | "ssh"
     backend_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    backend_host: Mapped[str] = mapped_column(String(255), default="127.0.0.1")
+    backend_host: Mapped[str] = mapped_column(String(255), default="0.0.0.0")
     backend_port: Mapped[int] = mapped_column(Integer, nullable=True)
     backend_user: Mapped[str | None] = mapped_column(String(128), nullable=True)
     backend_password: Mapped[str | None] = mapped_column(String(256), nullable=True)
@@ -42,7 +42,7 @@ class Configuration(Base, IDMixin, TimestampMixin):
     )
 
     # Managed SOCKS5 proxy layer (uniform endpoint for HAProxy)
-    socks_address: Mapped[str] = mapped_column(String(64), default="127.0.0.1")
+    socks_address: Mapped[str] = mapped_column(String(64), default="0.0.0.0")
     socks_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Runtime state

@@ -1,11 +1,3 @@
-"""DNS Balancer — local DNS proxy that selects the best resolver and forwards queries.
-
-Supports UDP, DoT (DNS-over-TLS), and DoH (DNS-over-HTTPS) listening endpoints.
-Resolver selection uses the configured strategy: round_robin, least_latency, weighted.
-"""
-
-from __future__ import annotations
-
 import asyncio
 import logging
 import random
@@ -13,9 +5,29 @@ import struct
 import ssl
 import base64
 from typing import Callable
+from dataclasses import dataclass
 
 import aiohttp
 from sqlalchemy import select
+from app.database import async_session
+from app.models.resolver import Resolver
+from app.models.balancer import DnsBalancerConfig
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class _CachedResolver:
+    id: int
+    resolver_type: str
+    address: str
+    last_latency_ms: float | None
+    success_rate: float
+    id: int
+    resolver_type: str
+    address: str
+    last_latency_ms: float | None
+    success_rate: float
+
 
 from app.database import async_session
 from app.models.resolver import Resolver
@@ -35,6 +47,11 @@ class DnsBalancerManager:
         self._rr_index = 0  # round-robin counter
         self.queries_handled = 0
         self.queries_failed = 0
+        self._client_tasks: set[asyncio.Task] = set()
+
+        self._strategy: str = "least_latency"
+        self._resolvers: list[_CachedResolver] = []
+        self._sync_task: asyncio.Task | None = None
 
     @property
     def is_running(self) -> bool:
@@ -65,6 +82,9 @@ class DnsBalancerManager:
                 )
                 self._udp_transport = transport
                 logger.info("DNS Balancer UDP listening on %s:%d", addr, config.udp_port)
+            except PermissionError as exc:
+                errors.append(f"UDP Permission Denied (try running as root for port {config.udp_port}): {exc}")
+                logger.warning("Permission denied starting DNS UDP on %s:%d", addr, config.udp_port)
             except Exception as exc:
                 errors.append(f"UDP: {exc}")
                 logger.exception("Failed to start DNS UDP on %s:%d", addr, config.udp_port)
@@ -95,6 +115,10 @@ class DnsBalancerManager:
             return {"ok": False, "message": f"All DNS listeners failed: {'; '.join(errors)}"}
 
         self._running = True
+        
+        # Start background sync
+        self._sync_task = asyncio.create_task(self._sync_loop())
+
         msg = "DNS Balancer started"
         if errors:
             msg += f" (warnings: {'; '.join(errors)})"
@@ -118,7 +142,12 @@ class DnsBalancerManager:
             await self._doh_server.wait_closed()
             self._doh_server = None
 
+        if self._sync_task and not self._sync_task.done():
+            self._sync_task.cancel()
+
         self._running = False
+        self._resolvers.clear()
+        
         logger.info("DNS Balancer stopped")
         return {"ok": True, "message": "Stopped"}
 
@@ -217,19 +246,45 @@ class DnsBalancerManager:
             await writer.wait_closed()
 
     # ------------------------------------------------------------------
-    # Resolver selection
+    # Resolver selection & Background Sync
     # ------------------------------------------------------------------
 
-    async def _select_resolver(self) -> Resolver | None:
-        """Pick a resolver based on the configured strategy."""
-        config = await self._load_config()
-        strategy = config.strategy if config else "least_latency"
+    async def _sync_loop(self):
+        """Periodically sync config and active resolvers from the database."""
+        while self._running:
+            try:
+                config = await self._load_config()
+                if config:
+                    self._strategy = config.strategy
+                
+                async with async_session() as session:
+                    result = await session.execute(
+                        select(Resolver).where(Resolver.status != "dead")
+                    )
+                    resolvers = list(result.scalars().all())
+                    
+                    # Update local cache safely
+                    new_resolvers = [
+                        _CachedResolver(
+                            id=r.id,
+                            resolver_type=r.resolver_type,
+                            address=r.address,
+                            last_latency_ms=r.last_latency_ms,
+                            success_rate=r.success_rate
+                        )
+                        for r in resolvers
+                    ]
+                    self._resolvers = new_resolvers
+                    
+            except Exception as exc:
+                logger.error("DNS Balancer sync error: %s", exc)
+                
+            await asyncio.sleep(5)
 
-        async with async_session() as session:
-            result = await session.execute(
-                select(Resolver).where(Resolver.status != "dead")
-            )
-            resolvers = list(result.scalars().all())
+    async def _select_resolver(self) -> _CachedResolver | None:
+        """Pick a resolver based on the configured strategy from memory."""
+        resolvers = self._resolvers
+        strategy = self._strategy
 
         if not resolvers:
             return None
@@ -352,7 +407,9 @@ class _UdpDnsProtocol(asyncio.DatagramProtocol):
         self._transport = transport
 
     def datagram_received(self, data: bytes, addr: tuple):
-        asyncio.create_task(self._handle(data, addr))
+        task = asyncio.create_task(self._handle(data, addr))
+        self._manager._client_tasks.add(task)
+        task.add_done_callback(self._manager._client_tasks.discard)
 
     async def _handle(self, data: bytes, addr: tuple):
         response = await self._manager.forward_query(data)

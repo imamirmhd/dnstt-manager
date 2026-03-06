@@ -10,7 +10,21 @@ engine = create_async_engine(
     settings.database_url,
     echo=False,
     future=True,
+    connect_args={"timeout": 15.0},
 )
+
+from sqlalchemy.engine import Engine
+from sqlalchemy import event
+import sqlite3
+
+@event.listens_for(Engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    if isinstance(dbapi_connection, sqlite3.Connection):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 

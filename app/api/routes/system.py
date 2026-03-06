@@ -68,9 +68,30 @@ async def get_system_stats():
 # --- Settings ---
 
 @router.get("/settings", response_model=list[SettingResponse])
-async def list_settings(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Setting).order_by(Setting.key))
-    return [SettingResponse.model_validate(s) for s in result.scalars().all()]
+async def list_settings():
+    from app.config import settings as app_settings
+    
+    keys = [
+        "dnstt_client_path",
+        "slipstream_client_path",
+        "haproxy_binary",
+        "health_check_interval",
+        "health_check_url",
+        "health_check_samples",
+        "resolver_check_interval",
+        "system_monitor_interval",
+        "resolver_dead_threshold_hours",
+        "max_restart_attempts",
+        "restart_backoff_base",
+        "restart_window_seconds",
+    ]
+    
+    responses = []
+    for k in keys:
+        if hasattr(app_settings, k):
+            responses.append(SettingResponse(key=k, value=str(getattr(app_settings, k))))
+            
+    return responses
 
 
 @router.put("/settings")

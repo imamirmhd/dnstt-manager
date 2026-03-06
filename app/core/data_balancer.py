@@ -60,6 +60,9 @@ class DataBalancerManager:
         self._down_kbps = 0.0
         self._speed_task: asyncio.Task | None = None
         self._ping_task: asyncio.Task | None = None
+        self._sync_task: asyncio.Task | None = None
+        self._strategy: str = "round_robin"
+        self._client_tasks: set[asyncio.Task] = set()
 
     @property
     def is_running(self) -> bool:
@@ -78,8 +81,19 @@ class DataBalancerManager:
             return {"ok": False, "message": "No Data balancer config found"}
 
         try:
+            # We must wrap _handle_client to trace the task in _client_tasks
+            async def _handle_and_track(reader, writer):
+                task = asyncio.current_task()
+                if task:
+                    self._client_tasks.add(task)
+                try:
+                    await self._handle_client(reader, writer)
+                finally:
+                    if task:
+                        self._client_tasks.discard(task)
+
             self._server = await asyncio.start_server(
-                self._handle_client,
+                _handle_and_track,
                 host=config.listen_address,
                 port=config.listen_port,
             )
@@ -90,9 +104,10 @@ class DataBalancerManager:
                 config.listen_address, config.listen_port,
             )
 
-            # Start background speed calculator and ping checker
+            # Start background speed calculator, ping checker, and config sync
             self._speed_task = asyncio.create_task(self._speed_loop())
             self._ping_task = asyncio.create_task(self._ping_loop())
+            self._sync_task = asyncio.create_task(self._sync_loop())
 
             return {
                 "ok": True,
@@ -115,6 +130,8 @@ class DataBalancerManager:
             self._speed_task.cancel()
         if self._ping_task and not self._ping_task.done():
             self._ping_task.cancel()
+        if self._sync_task and not self._sync_task.done():
+            self._sync_task.cancel()
 
         self._running = False
         self._backends.clear()
@@ -164,7 +181,7 @@ class DataBalancerManager:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ):
         """Accept client connection and proxy to a selected backend."""
-        backend = await self._select_backend()
+        backend = self._select_backend()
         if backend is None:
             logger.debug("Data Balancer: no healthy backends")
             self._log("Connection rejected: no healthy backends")
@@ -200,12 +217,11 @@ class DataBalancerManager:
         async def pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter, is_upload: bool):
             try:
                 while True:
-                    data = await src.read(8192)
+                    data = await src.read(16384)
                     if not data:
                         break
                     dst.write(data)
                     await dst.drain()
-                    # Track bandwidth
                     nbytes = len(data)
                     if is_upload:
                         backend.bytes_up += nbytes
@@ -213,7 +229,7 @@ class DataBalancerManager:
                     else:
                         backend.bytes_down += nbytes
                         self.bytes_down += nbytes
-            except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
+            except Exception:
                 pass
             finally:
                 try:
@@ -222,11 +238,25 @@ class DataBalancerManager:
                     pass
 
         try:
-            await asyncio.gather(
-                pipe(reader, up_writer, is_upload=True),
-                pipe(up_reader, writer, is_upload=False),
-            )
+            # Instead of return_exceptions=True which masks task references across gathers
+            t1 = asyncio.create_task(pipe(reader, up_writer, is_upload=True))
+            t2 = asyncio.create_task(pipe(up_reader, writer, is_upload=False))
+            self._client_tasks.add(t1)
+            self._client_tasks.add(t2)
+            t1.add_done_callback(self._client_tasks.discard)
+            t2.add_done_callback(self._client_tasks.discard)
+
+            await asyncio.gather(t1, t2, return_exceptions=True)
         finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
+            try:
+                up_writer.close()
+            except Exception:
+                pass
+
             self.active_connections -= 1
             backend.active_connections -= 1
             self._log(f"Connection closed: {peer_str} (config #{backend.config_id})")
@@ -269,64 +299,77 @@ class DataBalancerManager:
                 except Exception:
                     backend.ping_ms = None
 
+    async def _sync_loop(self):
+        """Periodically sync config and active backends from the database.
+        Runs in the background avoiding `database is locked` exceptions upon connection storms.
+        """
+        while self._running:
+            try:
+                # 1. Fetch Balancer strategy
+                config = await self._load_config()
+                self._strategy = config.strategy if config else "round_robin"
+
+                # 2. Fetch healthy running configs with socks_port
+                async with async_session() as session:
+                    result = await session.execute(
+                        select(Configuration)
+                        .where(Configuration.status == "running")
+                        .where(Configuration.health == "healthy")
+                        .where(Configuration.socks_port.isnot(None))
+                    )
+                    configs = list(result.scalars().all())
+
+                if not configs:
+                    # Also try running but unknown health (freshly started)
+                    async with async_session() as session:
+                        result = await session.execute(
+                            select(Configuration)
+                            .where(Configuration.status == "running")
+                            .where(Configuration.socks_port.isnot(None))
+                        )
+                        configs = list(result.scalars().all())
+
+                # 3. Update backend tracking in memory safely
+                active_ids = {c.id for c in configs}
+                
+                # Remove stale backends
+                for bid in list(self._backends.keys()):
+                    if bid not in active_ids:
+                        del self._backends[bid]
+                        
+                # Add/Update new backends
+                for c in configs:
+                    if c.id not in self._backends:
+                        self._backends[c.id] = _BackendStats(
+                            c.id, c.socks_address, c.socks_port
+                        )
+                    else:
+                        # Update address/port in case they changed
+                        self._backends[c.id].address = c.socks_address
+                        self._backends[c.id].port = c.socks_port
+
+            except Exception as exc:
+                logger.error("Data Balancer sync error: %s", exc)
+                
+            await asyncio.sleep(5)
+
     # ------------------------------------------------------------------
     # Backend selection
     # ------------------------------------------------------------------
 
-    async def _select_backend(self) -> _BackendStats | None:
-        """Pick a backend based on the configured strategy."""
-        config = await self._load_config()
-        strategy = config.strategy if config else "round_robin"
-
-        # Fetch healthy running configs with socks_port
-        async with async_session() as session:
-            result = await session.execute(
-                select(Configuration)
-                .where(Configuration.status == "running")
-                .where(Configuration.health == "healthy")
-                .where(Configuration.socks_port.isnot(None))
-            )
-            configs = list(result.scalars().all())
-
-        if not configs:
-            # Also try running but unknown health (freshly started)
-            async with async_session() as session:
-                result = await session.execute(
-                    select(Configuration)
-                    .where(Configuration.status == "running")
-                    .where(Configuration.socks_port.isnot(None))
-                )
-                configs = list(result.scalars().all())
-
-        if not configs:
+    def _select_backend(self) -> _BackendStats | None:
+        """Pick a backend instantly out of memory cache without querying the DB natively."""
+        backends = list(self._backends.values())
+        if not backends:
             return None
 
-        # Update backend tracking
-        active_ids = {c.id for c in configs}
-        # Remove stale backends
-        for bid in list(self._backends.keys()):
-            if bid not in active_ids:
-                del self._backends[bid]
-        # Add new backends
-        for c in configs:
-            if c.id not in self._backends:
-                self._backends[c.id] = _BackendStats(
-                    c.id, c.socks_address, c.socks_port
-                )
-            else:
-                # Update address/port in case they changed
-                self._backends[c.id].address = c.socks_address
-                self._backends[c.id].port = c.socks_port
-
-        backends = list(self._backends.values())
-
-        if strategy == "round_robin":
+        if self._strategy == "round_robin":
             b = backends[self._rr_index % len(backends)]
             self._rr_index += 1
             return b
-        elif strategy == "least_connections":
+        elif self._strategy == "least_connections":
             return min(backends, key=lambda b: b.active_connections)
-        elif strategy == "least_latency":
+        elif self._strategy == "least_latency":
             # Use latency from health checker metrics if available
             with_latency = [b for b in backends if b.latency_ms is not None]
             if with_latency:
@@ -334,6 +377,7 @@ class DataBalancerManager:
             return random.choice(backends)
 
         return random.choice(backends)
+
 
     # ------------------------------------------------------------------
     # Helpers
