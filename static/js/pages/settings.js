@@ -104,6 +104,10 @@ const SettingsPage = {
                             <label class="form-label">Resolver Dead Threshold (hours)</label>
                             <input class="form-input" id="setting-resolver_dead_threshold_hours" type="number" value="${map.resolver_dead_threshold_hours || 24}" min="1" />
                         </div>
+                        <div class="form-group" style="margin-top:12px;">
+                            <label class="form-label">Configuration Dead Threshold (hours)</label>
+                            <input class="form-input" id="setting-config_dead_threshold_hours" type="number" value="${map.config_dead_threshold_hours || 24}" min="1" />
+                        </div>
                     </div>
                 </div>
 
@@ -122,7 +126,7 @@ const SettingsPage = {
             'health_check_interval', 'health_check_url', 'health_check_samples',
             'resolver_check_interval', 'system_monitor_interval',
             'max_restart_attempts', 'restart_window_seconds', 'restart_backoff_base',
-            'resolver_dead_threshold_hours',
+            'resolver_dead_threshold_hours', 'config_dead_threshold_hours',
         ];
 
         let success = 0;

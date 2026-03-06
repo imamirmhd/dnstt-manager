@@ -31,6 +31,8 @@ class Settings:
     system_monitor_interval: int = 5
     # Resolver dead threshold (hours)
     resolver_dead_threshold_hours: int = 24
+    # Config dead threshold (hours)
+    config_dead_threshold_hours: int = 24
     # Process restart
     max_restart_attempts: int = 5
     restart_backoff_base: float = 2.0  # exponential backoff base

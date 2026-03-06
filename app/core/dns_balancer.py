@@ -297,7 +297,16 @@ class DnsBalancerManager:
             # Pick resolver with lowest latency; fall back to random if no data
             with_latency = [r for r in resolvers if r.last_latency_ms is not None]
             if with_latency:
-                return min(with_latency, key=lambda r: r.last_latency_ms)
+                best_latency = min(with_latency, key=lambda x: x.last_latency_ms).last_latency_ms
+                # Find all resolvers within 10ms of the absolute best latency
+                tolerance_ms = 10.0
+                candidates = [r for r in with_latency if r.last_latency_ms <= best_latency + tolerance_ms]
+                
+                # Sort candidates by preference: dot/doh > udp, then by latency
+                type_priority = {"dot": 0, "doh": 1, "udp": 2}
+                candidates.sort(key=lambda r: (type_priority.get(r.resolver_type, 99), r.last_latency_ms))
+                
+                return candidates[0]
             return random.choice(resolvers)
         elif strategy == "weighted":
             # Weight by success rate

@@ -93,3 +93,5 @@ class ConfigurationBrief(BaseModel):
     health: str
     resolver_id: int | None = None
     resolver_name: str | None = None
+    last_ping_ms: float | None = None
+    last_latency_ms: float | None = None

@@ -68,7 +68,7 @@ async def get_system_stats():
 # --- Settings ---
 
 @router.get("/settings", response_model=list[SettingResponse])
-async def list_settings():
+async def list_settings(db: AsyncSession = Depends(get_db)):
     from app.config import settings as app_settings
     
     keys = [
@@ -81,15 +81,34 @@ async def list_settings():
         "resolver_check_interval",
         "system_monitor_interval",
         "resolver_dead_threshold_hours",
+        "config_dead_threshold_hours",
         "max_restart_attempts",
         "restart_backoff_base",
         "restart_window_seconds",
     ]
     
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    
+    result = await db.execute(select(Setting).where(Setting.key.in_(keys)))
+    db_settings = {s.key: s for s in result.scalars().all()}
+    
     responses = []
+    fake_id = 1
     for k in keys:
-        if hasattr(app_settings, k):
-            responses.append(SettingResponse(key=k, value=str(getattr(app_settings, k))))
+        if k in db_settings:
+            responses.append(SettingResponse.model_validate(db_settings[k]))
+        elif hasattr(app_settings, k):
+            responses.append(
+                SettingResponse(
+                    id=fake_id,
+                    key=k,
+                    value=str(getattr(app_settings, k)),
+                    created_at=now,
+                    updated_at=now
+                )
+            )
+            fake_id += 1
             
     return responses
 

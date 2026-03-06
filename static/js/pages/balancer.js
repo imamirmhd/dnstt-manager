@@ -437,10 +437,6 @@ const BalancerPage = {
             const data = await res.json();
             if (res.ok && data.ok) {
                 UI.toast(data.message, 'success');
-                if (actionName === 'start') {
-                    // Automatically open details once started
-                    this.showDetail(type);
-                }
             } else {
                 UI.toast(data.message || `Failed to ${actionName}`, 'error');
             }

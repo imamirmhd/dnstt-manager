@@ -27,12 +27,46 @@ router = APIRouter(prefix="/api/configurations", tags=["configurations"], depend
 async def list_configurations(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Configuration).order_by(Configuration.id))
     configs = result.scalars().all()
+    
+    # Batch fetch the latest metric for each config to avoid N+1 queries
+    config_ids = [c.id for c in configs]
+    metrics_map = {}
+    if config_ids:
+        # Get the row with the max timestamp per configuration
+        from sqlalchemy import func
+        subq = (
+            select(
+                ConfigMetricSnapshot.configuration_id,
+                func.max(ConfigMetricSnapshot.timestamp).label("max_ts")
+            )
+            .where(ConfigMetricSnapshot.configuration_id.in_(config_ids))
+            .group_by(ConfigMetricSnapshot.configuration_id)
+            .subquery()
+        )
+        
+        latest_metrics_query = (
+            select(ConfigMetricSnapshot)
+            .join(
+                subq,
+                (ConfigMetricSnapshot.configuration_id == subq.c.configuration_id) &
+                (ConfigMetricSnapshot.timestamp == subq.c.max_ts)
+            )
+        )
+        m_res = await db.execute(latest_metrics_query)
+        for m in m_res.scalars().all():
+            metrics_map[m.configuration_id] = m
+
     briefs = []
     for c in configs:
         brief = ConfigurationBrief.model_validate(c)
-        # Populate resolver name from relationship
         if c.resolver:
             brief.resolver_name = c.resolver.name
+            
+        latest_metric = metrics_map.get(c.id)
+        if latest_metric:
+            brief.last_ping_ms = latest_metric.http_ping_ms
+            brief.last_latency_ms = latest_metric.latency_ms
+            
         briefs.append(brief)
     return briefs
 
@@ -151,6 +185,40 @@ async def restart_all_configurations(db: AsyncSession = Depends(get_db)):
     asyncio.create_task(_restart_bg())
     
     return {"ok": True, "message": f"Restarting {len(configs)} configurations in the background."}
+
+
+@router.post("/start-all")
+async def start_all_configurations(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Configuration).where(Configuration.status != "running"))
+    configs = list(result.scalars().all())
+    
+    import asyncio
+    
+    async def _start_bg():
+        for c in configs:
+            await process_manager.start(c.id)
+            await asyncio.sleep(0.5)
+            
+    asyncio.create_task(_start_bg())
+    
+    return {"ok": True, "message": f"Starting {len(configs)} configurations in the background."}
+
+
+@router.post("/stop-all")
+async def stop_all_configurations(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Configuration).where(Configuration.status == "running"))
+    configs = list(result.scalars().all())
+    
+    import asyncio
+    
+    async def _stop_bg():
+        for c in configs:
+            await process_manager.stop(c.id)
+            await asyncio.sleep(0.1)
+            
+    asyncio.create_task(_stop_bg())
+    
+    return {"ok": True, "message": f"Stopping {len(configs)} configurations in the background."}
 
 
 @router.get("/{config_id}/logs")

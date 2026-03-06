@@ -101,11 +101,47 @@ class HealthChecker:
                     )
                     session.add(snapshot)
                     
+                    # Check if it has been dead for > config_dead_threshold_hours
+                    from datetime import datetime, timezone, timedelta
+                    
+                    # Get the most recent successful snapshot
+                    last_success_res = await session.execute(
+                        select(ConfigMetricSnapshot.timestamp)
+                        .where(ConfigMetricSnapshot.configuration_id == cfg.id)
+                        .where(ConfigMetricSnapshot.is_alive == True)
+                        .order_by(ConfigMetricSnapshot.timestamp.desc())
+                        .limit(1)
+                    )
+                    last_succ_ts = last_success_res.scalar_one_or_none()
+                    
+                    status_val = "running"
+                    health_val = "unhealthy"
+                    
+                    now = datetime.now(timezone.utc).replace(tzinfo=None) # timestamps in db are naive utc
+                    if last_succ_ts:
+                        diff = now - last_succ_ts
+                        if diff > timedelta(hours=settings.config_dead_threshold_hours):
+                            logger.warning("Config %s has been dead for >%s hours. Stopping.", cfg.name, settings.config_dead_threshold_hours)
+                            status_val = "stopped"
+                            health_val = "dead"
+                            
+                            from app.core.process_manager import process_manager
+                            await process_manager.stop(cfg.id)
+                    else:
+                        # No successful pings ever. Check if the config itself is older than threshold
+                        if cfg.created_at and (now - cfg.created_at) > timedelta(hours=settings.config_dead_threshold_hours):
+                            logger.warning("Config %s has never been alive for >%s hours. Stopping.", cfg.name, settings.config_dead_threshold_hours)
+                            status_val = "stopped"
+                            health_val = "dead"
+                            
+                            from app.core.process_manager import process_manager
+                            await process_manager.stop(cfg.id)
+                    
                     # Update config health natively without fetching
                     await session.execute(
                         update(Configuration)
                         .where(Configuration.id == cfg.id)
-                        .values(health="unhealthy")
+                        .values(health=health_val, status=status_val)
                     )
                 else:
                     snapshot = ConfigMetricSnapshot(

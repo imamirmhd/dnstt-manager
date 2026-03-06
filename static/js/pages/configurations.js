@@ -31,6 +31,12 @@ const ConfigurationsPage = {
                     </div>
                     <div style="display:flex;gap:12px;align-items:center;">
                         <input type="text" class="form-input" style="width:200px;font-size:0.9rem;" placeholder="Search configurations..." value="${esc(this._searchQuery)}" onkeyup="ConfigurationsPage.setSearch(this.value)">
+                        <button class="btn" style="background:var(--card-bg);" onclick="ConfigurationsPage.actionAll('start-all')">
+                            <span style="display:flex;align-items:center;gap:6px;">▶ Start All</span>
+                        </button>
+                        <button class="btn" style="background:var(--card-bg);" onclick="ConfigurationsPage.actionAll('stop-all')">
+                            <span style="display:flex;align-items:center;gap:6px;">■ Stop All</span>
+                        </button>
                         <button class="btn" style="background:var(--card-bg);" onclick="ConfigurationsPage.actionAll('restart-all')">
                             <span style="display:flex;align-items:center;gap:6px;">↻ Restart All</span>
                         </button>
@@ -125,10 +131,39 @@ const ConfigurationsPage = {
             const res = await fetch('/api/configurations/');
             if (!res.ok) return;
             const result = await res.json();
-            this._allConfigs = Array.isArray(result) ? result : (result.items || []);
+            const newConfigs = Array.isArray(result) ? result : (result.items || []);
+
+            // Reconcile changes instead of blindly wiping the DOM
+            let needsFullRefresh = false;
+            if (this._allConfigs.length !== newConfigs.length) {
+                needsFullRefresh = true;
+            } else {
+                for (let i = 0; i < newConfigs.length; i++) {
+                    const oldObj = this._allConfigs.find(c => c.id === newConfigs[i].id);
+                    if (!oldObj || oldObj.status !== newConfigs[i].status || oldObj.health !== newConfigs[i].health || oldObj.name !== newConfigs[i].name) {
+                        needsFullRefresh = true;
+                        break;
+                    }
+                }
+            }
+
+            this._allConfigs = newConfigs;
             this._applyFilterAndPagination();
-            this._updateListDOM();
-        } catch (e) { }
+
+            if (needsFullRefresh) {
+                this._updateListDOM();
+            } else {
+                // If the array matches structurally, just update ping/latency and avoid DOM reset
+                const pageConfigs = this._filteredConfigs.slice((this._currentPage - 1) * this._perPage, this._currentPage * this._perPage);
+                for (const c of pageConfigs) {
+                    const pingEl = document.getElementById(`ping-${c.id}`);
+                    if (pingEl && c.last_ping_ms !== null && c.last_ping_ms !== undefined) {
+                        pingEl.style.display = '';
+                        pingEl.querySelector('.ping-value').textContent = c.last_ping_ms.toFixed(1) + ' ms';
+                    }
+                }
+            }
+        } catch (e) { console.error(e); }
     },
 
     async updateCard(id) {
@@ -214,10 +249,15 @@ const ConfigurationsPage = {
                     <span class="card-stat-value">${esc(c.resolver_name)}</span>
                 </div>
                 ` : ''}
-                <div class="card-stat" id="ping-${c.id}" style="display:none;">
+                <div class="card-stat" id="ping-${c.id}" style="${c.last_ping_ms !== null && c.last_ping_ms !== undefined ? '' : 'display:none;'}">
                     <span class="card-stat-label">HTTP Ping</span>
-                    <span class="card-stat-value ping-value">—</span>
+                    <span class="card-stat-value ping-value">${c.last_ping_ms !== null && c.last_ping_ms !== undefined ? c.last_ping_ms.toFixed(1) + ' ms' : '—'}</span>
                 </div>
+                ${c.last_latency_ms !== null && c.last_latency_ms !== undefined ? `
+                <div class="card-stat" id="latency-${c.id}">
+                    <span class="card-stat-label">TCP Latency</span>
+                    <span class="card-stat-value latency-value">${c.last_latency_ms.toFixed(1)} ms</span>
+                </div>` : ''}
                 <div class="card-stat" id="bw-${c.id}" style="display:none;">
                     <span class="card-stat-label">Bandwidth</span>
                     <span class="card-stat-value bw-value">—</span>
