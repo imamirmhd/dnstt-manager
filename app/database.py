@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.config import settings
 
@@ -11,6 +12,7 @@ engine = create_async_engine(
     echo=False,
     future=True,
     connect_args={"timeout": 15.0},
+    poolclass=NullPool,
 )
 
 from sqlalchemy.engine import Engine
